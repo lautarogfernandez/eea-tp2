@@ -1,0 +1,580 @@
+---
+title: "TP N°2 de Enfoque Estadístico del Aprendizaje: CART"
+author: "Natalia Argento y Lautaro Fernández"
+date: "6 de Diciembre de 2021"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  message = FALSE, warning = FALSE)
+ 
+```
+
+## Introducción
+
+Los datos con los que se trabajará en este trabajo provienen de un Juego de Simulación de Fútbol, llamado Football manager (edición 2020), que se pueden acceder a través de este link en Kaggle: https://www.kaggle.com/ktyptorio/football-manager-2020.
+En este dataset se encuentran los datos de los jugadores de las principales ligas de fútbol del planeta. Para acotar el análisis nos decidimos centrar en el fútbol de Argentina. Entre otras variables, podemos mencionar el peso, la altura, la edad, el club, el sueldo, las posiciones en las  que puede jugar, la calificación dentro del juego y la calificación máxima que puede aspirar el jugador dentro del juego, entre otros atributos que marcan las habilidades del jugador.
+
+El objetivo general del documento es aplicar un modelo de árboles de regresión predecir el **sueldo** de los jugadores según la información más relevante del dataset.
+
+
+## Ambiente de trabajo
+
+
+Limpiamos entorno
+```{r }
+rm( list=ls() )
+gc()
+```
+
+Seteamos una semilla
+```{r}
+seed = 270793
+set.seed(seed)
+```
+
+Cargamos las librerías que se usarán.
+```{r }
+library(rpart)
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(funModeling)
+library(Hmisc)
+library(GGally)
+library(rpart.plot)
+library(rattle)
+library(caret)
+library(yardstick)
+library(MASS)
+library(broom)
+library(purrr)
+```
+
+
+## 1) Cargamos y trabajamos los datos
+
+
+Definimos el path donde encontrar el dataset
+```{r}
+setwd("~/EEA/TP2")
+arch_jugadores = 'datafm20.csv'
+arch_posiciones = 'equivalencia_posiciones.csv'
+```
+
+Leemos los datsets que usaremos
+```{r}
+df_players_crudo = read.csv(arch_jugadores, header = TRUE, sep = ',', encoding = 'utf-8')
+df_equivalencia_posiciones = read.csv(arch_posiciones, header = TRUE, sep = ',', encoding = 'utf-8')
+```
+
+Mostramos las primeras filas de dataset de jugadores
+```{r}
+head(df_players_crudo, 10)
+```
+
+Renombramos las variables en castellano
+```{r}
+names(df_equivalencia_posiciones) = c("Original","Puesto","Posicion")
+
+names(df_players_crudo) = c("ID","Nombre","Posiciones","Club","Division","Division2",
+                            "Nacionalidad","Altura","Peso","Edad","PiernaPreferida",
+                               "MejorPosicion","MejorRol","Valor","Sueldo","CalidadActual","CalidadPotencial",
+                               "CapacidadTrabajo","Vision","SaqueManoArco","Tecnica","TrabajoEnEquipo",
+                               "Barridas","Fueza","Resistencia","TendenciaSalir","Reflejos",
+                               "TendenciaPunios","Posicionamiento","Penales","Pase","MaximaVelocidad",
+                               "manoAMano","SinPelota","FormaNatural","Marca","SaqueLargo",
+                               "LargaDistancia","Liderazgo","SaqueArcoPie","Salto","Cabezazo",
+                               "Agarre","TiroLibre","Instinto","AUnToque","Definicion",
+                               "Excentricidad","Dribbling","Determinacion","Decisiones","Centro",
+                               "Corner","Concentracion","Compostura","Comunicacion","MandoEnArea",
+                               "Valentia","Balance","Anticipacion","Agilidad","Agresividad",
+                               "HabilidadAerea","Aceleracion")
+```
+
+Unificamos la variable **MejorPosicion** con el dataset de *df_equivalencia_posiciones*
+```{r}
+df_players_crudo = df_players_crudo %>%
+  left_join(df_equivalencia_posiciones, by = c("MejorPosicion" = "Original"))
+```
+
+Unificamos la variable **PiernaPreferida**
+```{r}
+df_players_crudo$PiernaPreferida = ifelse(df_players_crudo$PiernaPreferida =="Right Only", "Right", df_players_crudo$PiernaPreferida)
+df_players_crudo$PiernaPreferida = ifelse(df_players_crudo$PiernaPreferida =="Left Only", "Left", df_players_crudo$PiernaPreferida)
+df_players_crudo$PiernaPreferida = ifelse(df_players_crudo$PiernaPreferida =="Right", "Diestro", df_players_crudo$PiernaPreferida)
+df_players_crudo$PiernaPreferida = ifelse(df_players_crudo$PiernaPreferida =="Left", "Zurdo", df_players_crudo$PiernaPreferida)
+df_players_crudo$PiernaPreferida = ifelse(df_players_crudo$PiernaPreferida =="Either", "Ambidiestro", df_players_crudo$PiernaPreferida)
+```
+
+Pasamos el Sueldo de semanal a mensual
+```{r}
+df_players_crudo$SueldoMensual = df_players_crudo$Sueldo * 4
+```
+
+Generamos una variable nueva que indica si el jugador es extranjero o no para los campeonatos argentinos
+```{r}
+df_players_crudo$Extranjero = ifelse(df_players_crudo$Nacionalidad =='ARG','NO','SI')
+```
+
+Por último, nos quedamos solo con las variables de más interés y solo con los jugadores que participan de las ligas de mayor relevancia de Argentina
+```{r}
+variables_analisis = c("Division2","Extranjero",
+"Altura","Peso","Edad","PiernaPreferida","Posicion",
+"Valor","SueldoMensual", 
+"CalidadActual","CalidadPotencial")
+
+divisiones = c("Argentina (Premier Division)","Argentina (Second Division)","Argentina (Metropolitan Zone)","Argentina (Interior Zone)")
+
+df_players_arg = df_players_crudo %>%
+  dplyr::filter(str_detect(Division, 'Argentine')) %>%
+  dplyr::filter(!str_detect(Club, 'Unknown')) %>%
+  dplyr::filter(Division2 %in% divisiones) %>%
+  dplyr::select(all_of(variables_analisis))
+```
+
+Así nos quedó nuestro dataset de trabajo
+```{r}
+head(df_players_arg, 10)
+```
+
+
+## 2) Análisis exploratorio
+
+
+Estudiamos el dataset en general
+```{r}
+summary(df_players_arg)
+```
+
+Definimos función de Análisis Exploratorio
+```{r}
+basic_eda <- function(data)
+{
+  status(data)
+  freq(data)
+  profiling_num(data)
+  plot_num(data)
+  describe(data)
+}
+```
+
+### Análisis general
+
+Genero análisis de los datos
+```{r}
+basic_eda(df_players_arg)
+```
+En el dataset predominan los jugadores diestros (casi 75%) ante los zurdos (casi 25%) y los ambidiestros (que son una rareza).
+
+Las posiciones de Mediocampistas y Defensores son las más frecuentes en el conjunto de datos (poco más del 30%), los Arqueros son los menos frecuentes (cercanos al 10%) y los Delanteros tienen un porcentaje de aparición del 25%. Esto es esperable por como se dividen los jugadores en el campo de juego.
+
+En cuanto a las divisiones, los jugadores se distribuyen en mayor proporción en las ligas de más categoría (esto puede ser ya que el juego se enfoca en las mejores ligas de cada país).
+
+Lógicamente, la cantidad de jugadores nacionales es muy superior a la de extranjeros (94% vs 6%).
+
+Para la calidad actual y la calidad potencial vemos que sus distribuciones son similares, pero con un corrimiento hacia valores más grandes en la potencial.
+
+Por el lado del sueldo mensual y el valor del jugador, ambos presentan concentración en valores pequeños y pocas apariciones en valores altos.
+
+
+### Correlaciones
+
+Vemos la correlación de las variables numéricas
+```{r}
+variables_numericas =  purrr::map_lgl(df_players_arg, is.numeric)
+df_num = df_players_arg[,variables_numericas]
+
+df_num %>%
+  GGally::ggpairs(.,
+                  title = "Matriz de correlaciones",
+                  upper = list(continuous = wrap("cor", size = 3, hjust=0.5))
+                  ) + 
+  theme_bw()
+```
+
+Existe una alta correlación lineal positiva (0.78) entre el peso y la altura de los jugadores. También existe cierta correlación lineal entre la calidad actual y la calidad potencial, llegando a casi 0.7. Por último, hay cierta relación lineal entre el valor y la calidad actual, y entre el valor y el sueldo mensual, pero menores a los casos anteriores.
+
+
+## 3) Ajustamos modelos
+
+
+### Modelo inicial
+
+
+Separamos el dataset en entrenamiento y test
+```{r}
+trainIndex = caret::createDataPartition(y = df_players_arg$SueldoMensual,
+                                        p = 0.75,
+                                        list = FALSE,
+                                        times = 1)
+ds_train = df_players_arg[ trainIndex,]
+ds_test  = df_players_arg[-trainIndex,]
+ds_test_x = ds_test[,setdiff(names(ds_test),c("SueldoMensual"))]
+ds_test_y = ds_test$SueldoMensual
+```
+
+
+Generamos un modelo con todas las variables con *rpart*
+```{r}
+modelo1 <- rpart(
+  formula = SueldoMensual ~ . ,
+  data    = ds_train
+  )
+```
+
+Mostramos como quedó el árbol
+```{r}
+rpart.plot(modelo1)
+
+fancyRpartPlot(modelo1,yesno=2,split.col="black",nn.col="black", 
+               caption="",branch.col="black")
+```
+
+Vemos el resumen del modelo ajustado
+```{r}
+summary(modelo1)
+```
+
+Para ver un poco mejor la importancia de las variables, haremos el siguiente gráfico
+```{r}
+variable_importance1  = modelo1$variable.importance
+variable_importance1 = data.frame(importance = round(variable_importance1 / sum(variable_importance1) * 100)) %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(importance) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+
+ggplot(variable_importance1) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = importance), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = importance, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  ylab("% Importancia") +
+  theme_bw()
+```
+
+Observamos en el ranking que las variables mas importantes son la calidad actual, el valor, la calidad potencial y la edad.
+
+
+Miremos las reglas, pero ordenadas en un dataframe
+```{r}
+rpart.rules(modelo1, roundint = FALSE, clip.facs = TRUE)
+```
+
+Así es más facíl comprender el proceso de evaluación de una nueva observación.
+
+
+### Modelo *cp=0*
+
+
+*rpart* pone un valor por defecto al parámetro *cp*, veamos que sucede si lo ponemos en 0. Para que el árbol pueda crecer libre, sobreescribo los valores de parámetros por defecto de *minsplit* y *minbucket* con valor 1
+```{r}
+modelo2 <- rpart(
+  formula = SueldoMensual ~ . ,
+  data    = ds_train,
+  control = list(cp = 0, minsplit = 1, minbucket = 1)
+  )
+```
+
+Mostramos como quedó el árbol
+```{r}
+rpart.plot(modelo2)
+
+fancyRpartPlot(modelo2,yesno=2,split.col="black",nn.col="black", 
+               caption="",branch.col="black")
+```
+
+El gráfico es muy extenso, lo que dificulta su lectura y comprensión. Confirmamos así que crece altamente la cantidad de nodos hojas al no utilizar el parámetro CP, dejando al árbol crecer libremente.
+
+Vemos la importancia de las variables
+```{r}
+variable_importance2  = modelo2$variable.importance
+variable_importance2 = data.frame(importance = round(variable_importance2 / sum(variable_importance2) * 100)) %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(importance) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+
+ggplot(variable_importance2) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = importance), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = importance, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  ylab("% Importancia") +
+  theme_bw()
+```
+
+Observamos que en el gráfico cambia levemnete el valor de las variables que menos importancia tienen
+
+Como ver el árbol generado se dificulta, vemos cuantas hojas se generaron
+```{r}
+sum(modelo2$frame$var == "<leaf>")
+```
+
+Además, observamos las veces que las variables se usaron como corte
+```{r}
+df_variables_2 = as.data.frame(modelo2$frame$var[modelo2$frame$var != "<leaf>"])
+names(df_variables_2) = c("variable")
+df_variables_2 %>%
+  group_by(variable) %>%
+  dplyr::summarise(n = n()) %>%
+  mutate(freq = round(n / sum(n),3)) %>%
+  arrange(-n)
+```
+
+
+### Modelo *cp ok*
+
+
+Un último paso que hacemos en esta sección es buscar, por cross validation, el mejor valor para el parámetro CP.
+```{r}
+set.seed(seed)
+train.control <- caret::trainControl(
+  method = "cv",
+  number = 10
+  )
+
+busqueda_cp <- train(
+  x = dplyr::select(ds_train, -c("SueldoMensual")),
+  y = ds_train$SueldoMensual, 
+  method = "rpart", 
+  tuneLength = 100, 
+  trControl = train.control
+  )
+
+busqueda_cp$bestTune
+
+modelo3 = rpart(
+  formula = SueldoMensual ~ . ,
+  data    = ds_train,
+  control = list(cp = busqueda_cp$bestTune[1,1])
+  )
+```
+
+
+Luego revisamos como quedó el ábol
+```{r}
+rpart.plot(modelo3)
+
+fancyRpartPlot(modelo3,yesno=2,split.col="black",nn.col="black", 
+               caption="",branch.col="black")
+```
+
+Como ver el árbol generado se dificulta nuevamente, vemos cuantas hojas se generaron
+```{r}
+sum(modelo3$frame$var == "<leaf>")
+```
+
+Una baja considerable con respecto al anterior
+
+Vemos la importancia de las variables
+```{r}
+variable_importance3  = modelo3$variable.importance
+variable_importance3 = data.frame(importance = round(variable_importance3 / sum(variable_importance3) * 100)) %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(importance) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+
+ggplot(variable_importance3) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = importance), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = importance, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  ylab("% Importancia") +
+  theme_bw()
+```
+
+Como antes, observamos las veces que las variables se usaron como corte
+```{r}
+df_variables_3 = as.data.frame(modelo3$frame$var[modelo3$frame$var != "<leaf>"])
+names(df_variables_3) = c("variable")
+df_variables_3 %>%
+  group_by(variable) %>%
+  dplyr::summarise(n = n()) %>%
+  mutate(freq = round(n / sum(n),3)) %>%
+  arrange(-n)
+```
+
+
+## 4) Generando otros modelos
+
+
+### Modelo *minsplit*
+
+
+Generamos un modelo, pero esta vez sacando la variable *CalidadActual* que fue muy importante para el primer modelo. Además agregaremos un control sobre el campo *minsplit*
+```{r}
+modelo4 <- rpart(
+  formula = SueldoMensual ~ . - CalidadActual,
+  data    = ds_train,
+  control = rpart.control(minsplit = 200)
+  )
+```
+
+Mostramos como quedó el árbol
+```{r}
+rpart.plot(modelo4)
+
+fancyRpartPlot(modelo4,yesno=2,split.col="black",nn.col="black", 
+               caption="",branch.col="black")
+```
+
+Vemos el resumen del modelo ajustado
+```{r}
+summary(modelo4)
+```
+
+Vemos la importancia de las variables para este modelo
+```{r}
+variable_importance4  = modelo4$variable.importance
+variable_importance4 = data.frame(importance = round(variable_importance4 / sum(variable_importance4) * 100)) %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(importance) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+
+ggplot(variable_importance4) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = importance), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = importance, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  ylab("% Importancia") +
+  theme_bw()
+```
+
+Observamos que al quitar la variable más usada anteriormente, las demás cobran más importancia. Si los comparamos, vemos que la edad subió en importancia y pasó a la calidad potencial.
+
+
+Vemos las reglas como dataframe
+```{r}
+rpart.rules(modelo4, roundint = FALSE, clip.facs = TRUE)
+```
+
+
+### Modelo *maxdepth*
+
+Luego, generamos otro modelo, pero esta vez sacando las variables *CalidadActual*, *CalidadPotencial* y *Valor*. Además estableceremos que no tenga una profundidad mayor a 4.
+```{r}
+modelo5 <- rpart(
+  formula = SueldoMensual ~ . - CalidadActual - CalidadPotencial - Valor,
+  data    = ds_train,
+  control = rpart.control(maxdepth = 4)
+  )
+```
+
+Mostramos como quedó el árbol
+```{r}
+rpart.plot(modelo5)
+
+fancyRpartPlot(modelo5,yesno=2,split.col="black",nn.col="black", 
+               caption="",branch.col="black")
+```
+
+Estudiamos la importcancia de variables de este nuevo árbol
+```{r}
+variable_importance5  = modelo5$variable.importance
+variable_importance5 = data.frame(importance = round(variable_importance5 / sum(variable_importance5) * 100)) %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(importance) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+
+ggplot(variable_importance5) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = importance), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = importance, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  ylab("% Importancia") +
+  theme_bw()
+```
+
+Como se ve en el árbol, la edad y la división son las que más importancia toman
+
+Vemos las reglas como dataframe
+```{r}
+rpart.rules(modelo5, roundint = FALSE, clip.facs = TRUE)
+```
+
+Vemos que en este ajuste de modelo se generaron menos hojas que en los modelos anteriores.
+
+
+## 5) Comprobremos la performance
+
+
+### Modelos lineales
+
+
+Primero, a fines comparativos, generamos un modelo lineal con todas las variables
+```{r}
+modelolm <- lm(SueldoMensual ~ ., data = ds_train)
+```
+
+Con el mismo fin, ajustamos un modelo lineal pero esta vez robusto
+```{r}
+modelolmrobusto <- MASS::rlm(SueldoMensual ~ ., data = ds_train)
+```
+
+
+### Predicciones
+
+
+Organizamos los modelos a evaluar en una lista
+```{r}
+modelos = list(
+  modelo_inicial = modelo1,
+  modelo_cp0 = modelo2,
+  modelo_cpok = modelo3,
+  modelo_minsplit = modelo4,
+  modelo_maxdepth = modelo5,
+  modelo_lm = modelolm,
+  modelo_lmrobusto = modelolmrobusto
+)
+```
+
+Obtenemos las predicciones
+```{r}
+lista_predicciones_test = map(.x = modelos, .f = predict, newdata = ds_test)
+```
+
+Agrego la predicción a cada modelo
+```{r}
+add_row <- function(pred,data)
+{
+  return( cbind(data,pred) )
+}
+
+ds_test_preds = map(.x = lista_predicciones_test, .f = add_row, data = ds_test)
+```
+
+
+### RMSE
+
+
+Calculamos el RMSE (raíz del error cuadrático medio) para los modelos ajustados
+```{r}
+map_dfr(.x = ds_test_preds, .f = yardstick::rmse, truth = SueldoMensual, estimate = pred, .id="modelo") %>% arrange(.estimate)
+```
+Vemos que para esta métrica el modelo para el cual buscamos el mejor Cp es mejor, acompañado muy de cerca por el primero generado. Ambos obtuvieron un mejor rendimiento para esta métrica que los lineales, mientras que los restantes modelos de árboles (a los que le quitamos variables importantes y al que crece libre) tienen performance baja.
+
+
+### MAE
+
+
+Calculamos el MAE (error absoluto medio) para los modelos ajustados
+```{r}
+map_dfr(.x = ds_test_preds, .f = yardstick::mae, truth = SueldoMensual, estimate = pred, .id="modelo") %>% arrange(.estimate)
+```
+Para el MAE, el modelo lineal robusto es el que mejor rendimiento obtuvo, seguido del modelo para el cual buscamos el mejor CP. Los restantes modelos de árboles tienen también pobre performance bajo esta métrica.
+
